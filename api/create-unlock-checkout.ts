@@ -16,15 +16,29 @@ const stripe = new Stripe(stripeSecretKey, {
   apiVersion: "2025-08-27.basil",
 });
 
+function setCors(res: any) {
+  res.setHeader("Access-Control-Allow-Origin", appBaseUrl);
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+}
+
 function sendJson(res: any, status: number, body: Record<string, unknown>) {
+  setCors(res);
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json");
   res.end(JSON.stringify(body));
 }
 
 export default async function handler(req: any, res: any) {
+  if (req.method === "OPTIONS") {
+    setCors(res);
+    res.statusCode = 200;
+    res.end();
+    return;
+  }
+
   if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
+    res.setHeader("Allow", "POST, OPTIONS");
     return sendJson(res, 405, { error: "Method not allowed" });
   }
 
