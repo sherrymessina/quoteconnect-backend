@@ -10,6 +10,11 @@ const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 const softrUnlockWebhookUrl = process.env.SOFTR_UNLOCK_WEBHOOK_URL;
 
+// New env vars for reading the Jobs table
+const softrApiKey = process.env.SOFTR_API_KEY;
+const softrDatabaseId = process.env.SOFTR_DATABASE_ID;
+const softrJobsTableId = process.env.SOFTR_JOBS_TABLE_ID;
+
 if (!stripeSecretKey) {
   throw new Error("Missing STRIPE_SECRET_KEY environment variable.");
 }
@@ -20,6 +25,18 @@ if (!stripeWebhookSecret) {
 
 if (!softrUnlockWebhookUrl) {
   throw new Error("Missing SOFTR_UNLOCK_WEBHOOK_URL environment variable.");
+}
+
+if (!softrApiKey) {
+  throw new Error("Missing SOFTR_API_KEY environment variable.");
+}
+
+if (!softrDatabaseId) {
+  throw new Error("Missing SOFTR_DATABASE_ID environment variable.");
+}
+
+if (!softrJobsTableId) {
+  throw new Error("Missing SOFTR_JOBS_TABLE_ID environment variable.");
 }
 
 const stripe = new Stripe(stripeSecretKey, {
@@ -36,44 +53,70 @@ async function readRawBody(req: any): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-function sendJson(res: any, status: number, body: Record<string, unknown>) {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json");
-  res.end(JSON.stringify(body));
+function getHeaderValue(value: string | string[] | undefined): string {
+  if (Array.isArray(value)) return value[0] || "";
+  return value || "";
+}
+
+async function getJobPhoneSnapshot(jobId: string): Promise<string> {
+  const url =
+    `https://tables-api.softr.io/api/v1/databases/${softrDatabaseId}` +
+    `/tables/${softrJobsTableId}/records?limit=1000&fieldNames=true`;
+
+  const response = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Softr-Api-Key": softrApiKey!,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Failed to load Jobs table records: ${response.status} ${text}`);
+  }
+
+  const json = await response.json();
+  const records = Array.isArray(json?.data) ? json.data : [];
+  const jobRecord = records.find((record: any) => record?.id === jobId);
+
+  if (!jobRecord) {
+    throw new Error(`Job record not found for jobId: ${jobId}`);
+  }
+
+  const fields = jobRecord.fields || {};
+
+  return (
+    fields["Phone Number"] ||
+    fields["Phone"] ||
+    fields["phoneNumber"] ||
+    fields["phone"] ||
+    ""
+  );
 }
 
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
-    return sendJson(res, 405, { error: "Method not allowed" });
+    return res.status(405).json({ error: "Method not allowed" });
   }
-
-  const signature = req.headers["stripe-signature"];
-
-  if (!signature || typeof signature !== "string") {
-    return sendJson(res, 400, { error: "Missing Stripe signature" });
-  }
-
-  let event: Stripe.Event;
 
   try {
     const rawBody = await readRawBody(req);
-    event = stripe.webhooks.constructEvent(
+    const signature = getHeaderValue(req.headers["stripe-signature"]);
+
+    if (!signature) {
+      return res.status(400).json({ error: "Missing Stripe signature header" });
+    }
+
+    const event = stripe.webhooks.constructEvent(
       rawBody,
       signature,
-      stripeWebhookSecret
+      stripeWebhookSecret!
     );
-  } catch (error: any) {
-    console.error("stripe-webhook signature verification failed:", error);
-    return sendJson(res, 400, {
-      error: "Invalid Stripe webhook signature",
-      details: error?.message || "Unknown error",
-    });
-  }
 
-  try {
     if (event.type !== "checkout.session.completed") {
-      return sendJson(res, 200, {
+      return res.status(200).json({
         received: true,
         ignored: true,
         eventType: event.type,
@@ -82,28 +125,48 @@ export default async function handler(req: any, res: any) {
 
     const session = event.data.object as Stripe.Checkout.Session;
 
-    const jobId = session.metadata?.jobId?.trim();
-    const contractorUserId = session.metadata?.contractorUserId?.trim();
-    const currency = session.currency?.toLowerCase();
+    const paymentStatus = session.payment_status;
+    const currency = (session.currency || "").toLowerCase();
     const amountTotal = session.amount_total ?? 0;
 
-    if (!jobId || !contractorUserId) {
-      return sendJson(res, 400, {
-        error: "Missing required Stripe metadata: jobId and contractorUserId",
+    if (paymentStatus !== "paid") {
+      return res.status(200).json({
+        received: true,
+        ignored: true,
+        reason: "Session not paid",
       });
     }
 
-    if (currency !== "cad" || amountTotal !== 3000) {
-      return sendJson(res, 400, {
-        error: "Unexpected Stripe payment amount or currency",
-        currency,
-        amountTotal,
+    if (currency !== "cad") {
+      return res.status(400).json({
+        error: `Invalid currency: ${currency}`,
       });
     }
 
-    const purchasedAt = session.created
-      ? new Date(session.created * 1000).toISOString()
-      : new Date().toISOString();
+    if (amountTotal !== 3000) {
+      return res.status(400).json({
+        error: `Invalid amount: ${amountTotal}`,
+      });
+    }
+
+    const jobId = session.metadata?.jobId || "";
+    const contractorUserId = session.metadata?.contractorUserId || "";
+    const customerEmail =
+      session.customer_details?.email ||
+      session.customer_email ||
+      "";
+
+    if (!jobId) {
+      return res.status(400).json({ error: "Missing jobId in session metadata" });
+    }
+
+    if (!contractorUserId) {
+      return res.status(400).json({
+        error: "Missing contractorUserId in session metadata",
+      });
+    }
+
+    const phoneSnapshot = await getJobPhoneSnapshot(jobId);
 
     const workflowPayload = {
       stripeEventId: event.id,
@@ -112,13 +175,14 @@ export default async function handler(req: any, res: any) {
       paymentStatus: "Succeeded",
       amountPaid: 30,
       currency: "cad",
-      purchasedAt,
+      purchasedAt: new Date().toISOString(),
       jobId,
       contractorUserId,
-      customerEmail: session.customer_details?.email || session.customer_email || null,
+      customerEmail,
+      phoneSnapshot,
     };
 
-    const workflowResponse = await fetch(softrUnlockWebhookUrl, {
+    const workflowResponse = await fetch(softrUnlockWebhookUrl!, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -127,28 +191,22 @@ export default async function handler(req: any, res: any) {
     });
 
     if (!workflowResponse.ok) {
-      const workflowText = await workflowResponse.text().catch(() => "");
-      console.error("stripe-webhook failed to call Softr workflow:", workflowText);
-
-      return sendJson(res, 500, {
-        error: "Failed to forward payment to Softr workflow",
-        status: workflowResponse.status,
-        details: workflowText || "No response body",
+      const text = await workflowResponse.text();
+      return res.status(500).json({
+        error: "Failed to send payload to Softr workflow",
+        details: text,
       });
     }
 
-    return sendJson(res, 200, {
+    return res.status(200).json({
       received: true,
       forwarded: true,
-      sessionId: session.id,
-      jobId,
-      contractorUserId,
+      phoneSnapshotIncluded: true,
     });
   } catch (error: any) {
-    console.error("stripe-webhook handler error:", error);
-    return sendJson(res, 500, {
-      error: "Stripe webhook handler failed",
-      details: error?.message || "Unknown error",
+    console.error("stripe-webhook error:", error);
+    return res.status(400).json({
+      error: error?.message || "Webhook error",
     });
   }
 }
