@@ -19,6 +19,8 @@ const softrApiKey = process.env.SOFTR_API_KEY;
 const softrDatabaseId = process.env.SOFTR_DATABASE_ID;
 const softrJobsTableId = process.env.SOFTR_JOBS_TABLE_ID;
 
+const stripeUnlockTaxRateId = "txr_1TJDf33beV513bkPjM0mMxg0";
+
 if (!stripeSecretKey) {
   throw new Error("Missing STRIPE_SECRET_KEY environment variable.");
 }
@@ -187,11 +189,14 @@ export default async function handler(req: any, res: any) {
             unit_amount: 3000,
           },
           quantity: 1,
+          tax_rates: [stripeUnlockTaxRateId],
         },
       ],
       metadata: {
         jobId,
         contractorUserId,
+        baseUnlockAmount: "3000",
+        taxMode: "exclusive",
       },
     });
 
