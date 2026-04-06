@@ -176,6 +176,7 @@ export default async function handler(req: any, res: any) {
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
+      payment_method_types: ["card"],
       success_url: `${appBaseUrl}/unlock-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${appBaseUrl}/unlock-cancel`,
       line_items: [
@@ -183,7 +184,7 @@ export default async function handler(req: any, res: any) {
           price_data: {
             currency: "cad",
             product_data: {
-              name: "GTARenovino Project Unlock",
+              name: "Project Unlock",
               description: "Unlock homeowner phone number",
             },
             unit_amount: 3000,
