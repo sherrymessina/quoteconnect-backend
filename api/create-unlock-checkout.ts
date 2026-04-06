@@ -183,8 +183,8 @@ export default async function handler(req: any, res: any) {
           price_data: {
             currency: "cad",
             product_data: {
-              name: "QuoteConnect Job Unlock",
-              description: "One-time unlock for homeowner phone number",
+              name: "GTARenovino Project Unlock",
+              description: "Unlock homeowner phone number",
             },
             unit_amount: 3000,
           },
