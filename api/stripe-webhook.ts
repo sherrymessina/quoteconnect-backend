@@ -64,6 +64,10 @@ const softrDatabaseId = process.env.SOFTR_DATABASE_ID;
 const softrJobsTableId = process.env.SOFTR_JOBS_TABLE_ID;
 const softrUnlocksTableId = process.env.SOFTR_UNLOCKS_TABLE_ID;
 
+const EXPECTED_BASE_AMOUNT_CENTS = 3000;
+const EXPECTED_TAX_AMOUNT_CENTS = 390;
+const EXPECTED_TOTAL_AMOUNT_CENTS = 3390;
+
 if (!stripeSecretKey) {
   throw new Error("Missing STRIPE_SECRET_KEY environment variable.");
 }
@@ -256,6 +260,7 @@ async function createUnlockRecord(params: {
   stripeSessionId: string;
   phoneSnapshot: string;
   purchasedAt: string;
+  amountPaid: number;
 }) {
   const unlockFields = await getTableFields(softrUnlocksTableId!);
 
@@ -276,7 +281,7 @@ async function createUnlockRecord(params: {
     [contractorUserIdField.id]: params.contractorUserId,
     [phoneSnapshotRawField.id]: params.phoneSnapshot,
     [stripeSessionIdField.id]: params.stripeSessionId,
-    [amountPaidField.id]: 30,
+    [amountPaidField.id]: params.amountPaid,
     [purchasedAtField.id]: params.purchasedAt,
   };
 
@@ -336,7 +341,9 @@ export default async function handler(req: any, res: any) {
 
     const paymentStatus = session.payment_status;
     const currency = (session.currency || "").toLowerCase();
+    const amountSubtotal = session.amount_subtotal ?? 0;
     const amountTotal = session.amount_total ?? 0;
+    const amountTax = session.total_details?.amount_tax ?? 0;
 
     if (paymentStatus !== "paid") {
       return res.status(200).json({
@@ -352,9 +359,21 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    if (amountTotal !== 3000) {
+    if (amountSubtotal !== EXPECTED_BASE_AMOUNT_CENTS) {
       return res.status(400).json({
-        error: `Invalid amount: ${amountTotal}`,
+        error: `Invalid subtotal: ${amountSubtotal}`,
+      });
+    }
+
+    if (amountTax !== EXPECTED_TAX_AMOUNT_CENTS) {
+      return res.status(400).json({
+        error: `Invalid tax amount: ${amountTax}`,
+      });
+    }
+
+    if (amountTotal !== EXPECTED_TOTAL_AMOUNT_CENTS) {
+      return res.status(400).json({
+        error: `Invalid total amount: ${amountTotal}`,
       });
     }
 
@@ -394,6 +413,7 @@ export default async function handler(req: any, res: any) {
       stripeSessionId: session.id,
       phoneSnapshot,
       purchasedAt,
+      amountPaid: amountTotal / 100,
     });
 
     return res.status(200).json({
